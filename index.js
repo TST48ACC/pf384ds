@@ -8,40 +8,57 @@ app.use(cookieParser());
 const ORIGIN_EDU = "https://eduphoria.pages.dev";
 const ORIGIN_SANTA = "https://smartfoloosanta.pages.dev";
 
-// Helper to fetch and "Clean" the code
 async function fetchAndClean(targetUrl, host) {
     try {
         const res = await axios.get(targetUrl, {
             responseType: 'arraybuffer',
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0' },
-            timeout: 5000
+            headers: { 
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                'Referer': ORIGIN_EDU
+            },
+            timeout: 8000
         });
 
         let contentType = res.headers['content-type'] || '';
         let data = res.data;
 
-        if (contentType.includes("text") || contentType.includes("javascript")) {
+        if (contentType.includes("text/html") || contentType.includes("javascript")) {
             let text = data.toString();
             
-            // 1. Kill the specific "IP Scare" / Helloskids redirect
-            // This looks for ANY mention of helloskids and stops it
-            text = text.replace(/location\.href\s*=\s*.*?helloskids.*?/gi, "console.log('Redirect Blocked')");
-            text = text.replace(/window\.location\.replace\(.*?helloskids.*?\)/gi, "console.log('Redirect Blocked')");
+            // 1. THE HELLOSKIDS ANNIHILATOR (Base64 + Plaintext)
+            // This catches "aHR0cHM6Ly9oZWxsb3NraWRz" which is "https://helloskids" in base64
+            const b64scare = "aHR0cHM6Ly9oZWxsb3NraWRz"; 
+            text = text.replaceAll(b64scare, "Y29uc29sZS5sb2coJ0Jsb2NrZWQnKQ=="); // Replaces with base64 of console.log
+            text = text.replace(/helloskids/gi, "localhost"); // Total text overwrite
             
-            // 2. Stop frame-breaking (common cause of redirects)
-            text = text.replace(/if\s*\(top\s*!==\s*self\)/g, "if(false)");
-            text = text.replace(/if\s*\(window\s*!==\s*top\)/g, "if(false)");
+            // 2. DISABLE REDIRECT FUNCTIONS
+            // We rewrite the browser's ability to redirect if the word 'helloskids' is involved
+            const protectionScript = `
+            <script>
+            (function() {
+                const oldLocation = window.location.replace;
+                window.location.replace = function(url) {
+                    if(url.includes('helloskids')) { console.log('Blocked Replace'); return; }
+                    return oldLocation.apply(this, arguments);
+                };
+                window.onbeforeunload = function() { return "Blocked redirect attempt"; };
+            })();
+            </script>`;
+            
+            if(contentType.includes("html")) {
+                text = text.replace("<head>", "<head>" + protectionScript);
+            }
 
-            // 3. Fix internal links
+            // 3. KILL FRAME BREAKERS & DOMAIN LOCKS
+            text = text.replace(/window\.top\s*!==\s*window\.self/g, "false");
+            text = text.replace(/top\.location/g, "self.location");
             text = text.replaceAll("eduphoria.pages.dev", host);
             text = text.replaceAll("smartfoloosanta.pages.dev", host);
 
             return { data: Buffer.from(text), contentType };
         }
         return { data, contentType };
-    } catch (e) {
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
 app.all('*', async (req, res) => {
@@ -49,14 +66,12 @@ app.all('*', async (req, res) => {
     const urlPath = req.path;
     const gameName = req.query.game || req.cookies.active_game;
 
-    // Set cookie if game is detected
     if (req.query.game) {
         res.cookie('active_game', req.query.game, { maxAge: 3600000, path: '/' });
     }
 
-    // Step 1: Logic for the "Smart Search"
     let targets = [];
-    if (gameName && urlPath !== "/play.html" && urlPath !== "/") {
+    if (gameName && urlPath !== "/" && !urlPath.includes("index.html")) {
         targets.push(`${ORIGIN_SANTA}/${gameName}${urlPath}`);
     }
     targets.push(`${ORIGIN_EDU}${urlPath}${req.url.slice(req.path.length)}`);
@@ -68,13 +83,14 @@ app.all('*', async (req, res) => {
         if (result) break;
     }
 
-    if (!result) return res.status(404).send("File Not Found");
+    if (!result) return res.status(404).send("Not Found");
 
-    // Remove Security Headers that allow the "Scare" to trigger or block the frame
-    res.set("Access-Control-Allow-Origin", "*");
-    res.set("Content-Type", result.contentType);
+    res.set({
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": result.contentType,
+        "X-Frame-Options": "ALLOWALL" // Explicitly allow framing
+    });
     res.removeHeader("Content-Security-Policy");
-    res.removeHeader("X-Frame-Options");
     
     res.send(result.data);
 });
