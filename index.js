@@ -8,65 +8,75 @@ app.use(cookieParser());
 const ORIGIN_EDU = "https://eduphoria.pages.dev";
 const ORIGIN_SANTA = "https://smartfoloosanta.pages.dev";
 
+// Helper to fetch and "Clean" the code
+async function fetchAndClean(targetUrl, host) {
+    try {
+        const res = await axios.get(targetUrl, {
+            responseType: 'arraybuffer',
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0' },
+            timeout: 5000
+        });
+
+        let contentType = res.headers['content-type'] || '';
+        let data = res.data;
+
+        if (contentType.includes("text") || contentType.includes("javascript")) {
+            let text = data.toString();
+            
+            // 1. Kill the specific "IP Scare" / Helloskids redirect
+            // This looks for ANY mention of helloskids and stops it
+            text = text.replace(/location\.href\s*=\s*.*?helloskids.*?/gi, "console.log('Redirect Blocked')");
+            text = text.replace(/window\.location\.replace\(.*?helloskids.*?\)/gi, "console.log('Redirect Blocked')");
+            
+            // 2. Stop frame-breaking (common cause of redirects)
+            text = text.replace(/if\s*\(top\s*!==\s*self\)/g, "if(false)");
+            text = text.replace(/if\s*\(window\s*!==\s*top\)/g, "if(false)");
+
+            // 3. Fix internal links
+            text = text.replaceAll("eduphoria.pages.dev", host);
+            text = text.replaceAll("smartfoloosanta.pages.dev", host);
+
+            return { data: Buffer.from(text), contentType };
+        }
+        return { data, contentType };
+    } catch (e) {
+        return null;
+    }
+}
+
 app.all('*', async (req, res) => {
+    const host = req.get('host');
     const urlPath = req.path;
     const gameName = req.query.game || req.cookies.active_game;
 
-    // 1. HOME PAGE LOCK
-    if (urlPath === "/" || urlPath === "/index.html") {
-        try {
-            const response = await axios.get(ORIGIN_EDU + urlPath);
-            let text = response.data.toString().replaceAll("eduphoria.pages.dev", req.get('host'));
-            return res.type('html').send(text);
-        } catch (e) { return res.status(500).send("Error loading home"); }
+    // Set cookie if game is detected
+    if (req.query.game) {
+        res.cookie('active_game', req.query.game, { maxAge: 3600000, path: '/' });
     }
 
-    // 2. THE SMART SEARCH (Try Santa Subfolder -> Eduphoria Root -> Santa Root)
-    let finalRes = null;
+    // Step 1: Logic for the "Smart Search"
     let targets = [];
-
-    if (gameName && urlPath !== "/play.html") {
+    if (gameName && urlPath !== "/play.html" && urlPath !== "/") {
         targets.push(`${ORIGIN_SANTA}/${gameName}${urlPath}`);
     }
     targets.push(`${ORIGIN_EDU}${urlPath}${req.url.slice(req.path.length)}`);
     targets.push(`${ORIGIN_SANTA}${urlPath}${req.url.slice(req.path.length)}`);
 
+    let result = null;
     for (let target of targets) {
-        try {
-            finalRes = await axios.get(target, { 
-                responseType: 'arraybuffer',
-                headers: { 'User-Agent': req.get('User-Agent') },
-                validateStatus: (status) => status === 200 
-            });
-            if (finalRes) break;
-        } catch (e) { continue; }
+        result = await fetchAndClean(target, host);
+        if (result) break;
     }
 
-    if (!finalRes) return res.status(404).send("404: Not Found");
+    if (!result) return res.status(404).send("File Not Found");
 
-    // 3. BRAINWASHING (Fixing the IP Scare/Redirects)
-    let contentType = finalRes.headers['content-type'] || '';
-    
-    // Set Cookie if game is in URL
-    if (req.query.game) {
-        res.cookie('active_game', req.query.game, { maxAge: 3600000, path: '/' });
-    }
-
-    // Security Header Bypass
+    // Remove Security Headers that allow the "Scare" to trigger or block the frame
     res.set("Access-Control-Allow-Origin", "*");
+    res.set("Content-Type", result.contentType);
     res.removeHeader("Content-Security-Policy");
     res.removeHeader("X-Frame-Options");
-
-    if (contentType.includes("text/html") || contentType.includes("javascript")) {
-        let text = finalRes.data.toString()
-            .replaceAll("eduphoria.pages.dev", req.get('host'))
-            .replaceAll("smartfoloosanta.pages.dev", req.get('host'))
-            // This kills the "helloskids" IP Scare redirect
-            .replace(/location\.href\s*=\s*['"][^'"]*helloskids[^'"]*['"]/g, "console.log('Stop')");
-        return res.type(contentType).send(text);
-    }
-
-    res.type(contentType).send(finalRes.data);
+    
+    res.send(result.data);
 });
 
 app.listen(process.env.PORT || 3000);
