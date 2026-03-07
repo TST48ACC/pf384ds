@@ -9,73 +9,77 @@ const ORIGIN_SANTA = "https://smartfoloosanta.pages.dev";
 const ORIGIN_EDU = "https://eduphoria.pages.dev";
 
 app.all('*', async (req, res) => {
+    const host = req.get('host');
     const urlPath = req.path;
     const fullUrl = req.url;
-    
-    // 1. GET GAME NAME (Same logic as your _worker.js)
+
+    // 1. HOME PAGE LOCK
+    if (urlPath === "/" || urlPath === "/index.html") {
+        try {
+            const eduRes = await axios.get(ORIGIN_EDU + urlPath);
+            let text = eduRes.data.toString().replaceAll("eduphoria.pages.dev", host);
+            return res.type('html').send(text);
+        } catch (e) { return res.status(500).send("Menu Error"); }
+    }
+
+    // 2. GET GAME NAME (Exactly like your Worker)
     let gameName = req.query.game || req.cookies.active_game;
     if (!gameName && req.get('Referer')?.includes('game=')) {
-        const refUrl = new URL(req.get('Referer'));
-        gameName = refUrl.searchParams.get('game');
+        try {
+            const refUrl = new URL(req.get('Referer'));
+            gameName = refUrl.searchParams.get('game');
+        } catch(e) {}
     }
 
-    // 2. THE SMART SEARCH (Mirroring your Worker's fetch priority)
-    let responseData = null;
-    let targetUrl = "";
+    // 3. THE SMART SEARCH
+    let finalRes = null;
+    let attempts = [];
 
-    // Priority A: Santa Subfolder
-    if (gameName && urlPath !== "/play.html" && urlPath !== "/") {
-        targetUrl = `${ORIGIN_SANTA}/${gameName}${urlPath}`.replace(/\/+/g, '/');
+    if (gameName && urlPath !== "/play.html") {
+        attempts.push(`${ORIGIN_SANTA}/${gameName}${urlPath}`.replace(/\/+/g, '/'));
+    }
+    attempts.push(ORIGIN_EDU + fullUrl);
+    attempts.push(ORIGIN_SANTA + fullUrl);
+
+    for (let target of attempts) {
         try {
-            const temp = await axios.get(targetUrl, { responseType: 'arraybuffer', headers: { 'Referer': ORIGIN_EDU + "/" } });
-            if (temp.status === 200) responseData = temp;
+            finalRes = await axios.get(target, {
+                responseType: 'arraybuffer',
+                headers: { 'Referer': ORIGIN_EDU + "/", 'User-Agent': req.get('User-Agent') },
+                validateStatus: (status) => status === 200
+            });
+            if (finalRes) break;
         } catch (e) {}
     }
 
-    // Priority B: Eduphoria Root
-    if (!responseData) {
-        try {
-            const temp = await axios.get(ORIGIN_EDU + fullUrl, { responseType: 'arraybuffer' });
-            if (temp.status === 200) responseData = temp;
-        } catch (e) {}
-    }
+    if (!finalRes) return res.status(404).send("404");
 
-    // Priority C: Santa Root
-    if (!responseData) {
-        try {
-            const temp = await axios.get(ORIGIN_SANTA + fullUrl, { responseType: 'arraybuffer' });
-            if (temp.status === 200) responseData = temp;
-        } catch (e) {}
-    }
-
-    if (!responseData) return res.status(404).send("404: Not Found");
-
-    // 3. BRAINWASHING (The code that kills the redirect)
-    let contentType = responseData.headers['content-type'] || '';
+    // 4. THE BRAINWASHING (Exact mirror of your Worker)
+    let contentType = finalRes.headers['content-type'] || '';
     
-    // Set cookie if game is detected
     if (req.query.game) {
-        res.cookie('active_game', req.query.game, { maxAge: 3600000, path: '/', sameSite: 'lax' });
+        res.cookie('active_game', req.query.game, { maxAge: 3600000, path: '/' });
     }
 
-    // Standard Header Fixes
     res.set("Access-Control-Allow-Origin", "*");
     res.removeHeader("Content-Security-Policy");
     res.removeHeader("X-Frame-Options");
 
-    if (contentType.includes("text/html") || urlPath.endsWith(".js")) {
-        let text = responseData.data.toString();
+    if (contentType.includes("text/html") || urlPath.endsWith(".js") || contentType.includes("javascript")) {
+        let text = finalRes.data.toString();
         
-        // Exact replacement from your worker
+        // This is the specific line from your Worker that kills the redirect
+        // I added 'gi' (Global + Ignore Case) to make it more powerful than the original
         let fixedText = text
-            .replaceAll("eduphoria.pages.dev", req.get('host'))
-            .replaceAll("smartfoloosanta.pages.dev", req.get('host'))
-            .replace(/location\.href\s*=\s*['"][^'"]*helloskids[^'"]*['"]/g, "console.log('Stop')");
+            .replaceAll("eduphoria.pages.dev", host)
+            .replaceAll("smartfoloosanta.pages.dev", host)
+            .replace(/location\.href\s*=\s*['"][^'"]*helloskids[^'"]*['"]/gi, "console.log('Redirect Blocked')")
+            .replace(/window\.location\.href\s*=\s*['"][^'"]*helloskids[^'"]*['"]/gi, "console.log('Redirect Blocked')");
             
         return res.type(contentType).send(fixedText);
     }
 
-    res.type(contentType).send(responseData.data);
+    res.type(contentType).send(finalRes.data);
 });
 
 app.listen(process.env.PORT || 3000);
