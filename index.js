@@ -112,4 +112,4 @@ app.all('*', async (req, res) => {
     res.type(contentType).send(finalRes.data);
 });
 
-app.listen(process.env.PORT || 3000);
+app.listen(process.env.PORT || 3000);.
